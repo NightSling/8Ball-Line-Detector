@@ -83,6 +83,19 @@ def merge_and_select_top_lines(lines, max_lines=3):
     return selected
 
 
+def draw_dotted_line(img, p1, p2, color=(0, 255, 0), thickness=2, gap=10):
+    """Draw a dotted line from p1 to p2."""
+    dist = int(np.hypot(p2[0]-p1[0], p2[1]-p1[1]))
+    if dist == 0:
+        return
+    for i in range(0, dist, gap*2):
+        x_start = int(p1[0] + (p2[0]-p1[0])*(i/dist))
+        y_start = int(p1[1] + (p2[1]-p1[1])*(i/dist))
+        x_end = int(p1[0] + (p2[0]-p1[0])*((i+gap)/dist))
+        y_end = int(p1[1] + (p2[1]-p1[1])*((i+gap)/dist))
+        cv2.line(img, (x_start, y_start), (x_end, y_end), color, thickness)
+
+
 # --- Setup ---
 cap = cv2.VideoCapture("/dev/video2", cv2.CAP_V4L2)
 cv2.namedWindow("Hough Line Tuner", cv2.WINDOW_NORMAL)
@@ -96,8 +109,6 @@ cv2.createTrackbar("MinLineLength", "Hough Line Tuner", 23, 500, nothing)
 cv2.createTrackbar("MaxLineGap", "Hough Line Tuner", 10, 100, nothing)
 cv2.createTrackbar("Gaussian Kernel", "Hough Line Tuner", 5, 31, nothing)
 cv2.createTrackbar("Downscale (%)", "Hough Line Tuner", 100, 100, nothing)
-cv2.createTrackbar("Debug (0/1)", "Hough Line Tuner",
-                   0, 1, nothing)  # Debug toggle
 
 print("Press 's' to start setting boundary")
 
@@ -107,7 +118,6 @@ while True:
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         continue
 
-    debug_mode = cv2.getTrackbarPos("Debug (0/1)", "Hough Line Tuner") == 1
     display_frame = frame.copy()
 
     # Draw clicked points
@@ -145,27 +155,61 @@ while True:
         blurred = cv2.GaussianBlur(gray, (gk, gk), 0)
         edges = cv2.Canny(blurred, cmin, cmax, apertureSize=3)
 
-        if debug_mode:
-            # Only show Canny / grayscale in ROI
-            display_frame = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-        else:
-            # Merge and select top lines
-            lines = cv2.HoughLinesP(edges, 1, np.pi/180, thresh,
-                                    minLineLength=min_len,
-                                    maxLineGap=max_gap)
-            top_lines = merge_and_select_top_lines(lines)
+        # Merge and select top lines
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, thresh,
+                                minLineLength=min_len,
+                                maxLineGap=max_gap)
+        top_lines = merge_and_select_top_lines(lines)
 
-            # Draw extended lines on original frame
-            for slope, intercept in top_lines:
-                if slope == np.inf:
-                    x1, y1 = int(intercept / scale) + x, y
-                    x2, y2 = int(intercept / scale) + x, y+h
-                else:
-                    ex1, ey1, ex2, ey2 = extend_line(
-                        0, intercept, w/scale, slope*(w/scale)+intercept, int(w/scale))
-                    x1, y1 = int(ex1) + x, int(ey1) + y
-                    x2, y2 = int(ex2) + x, int(ey2) + y
-                cv2.line(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+        # Draw main line and reflections
+        for slope, intercept in top_lines:
+            # Determine main line endpoints
+            if slope == np.inf:
+                x1, y1 = int(intercept / scale) + x, y
+                x2, y2 = int(intercept / scale) + x, y+h
+            else:
+                ex1, ey1, ex2, ey2 = extend_line(
+                    0, intercept, w/scale, slope*(w/scale)+intercept, int(w/scale))
+                x1, y1 = int(ex1) + x, int(ey1) + y
+                x2, y2 = int(ex2) + x, int(ey2) + y
+
+            # Draw main line dotted red
+            draw_dotted_line(display_frame, (x1, y1),
+                             (x2, y2), color=(0, 0, 255))
+
+            # Reflection lines (up to 3 bounces)
+            cx, cy = x1, y1
+            dx, dy = x2 - x1, y2 - y1
+            length = (dx**2 + dy**2)**0.5
+            if length == 0:
+                continue
+            dx /= length
+            dy /= length
+
+            for _ in range(3):
+                # compute intersection distances with walls
+                t_vals = []
+                if dx > 0:
+                    t_vals.append(((x + w) - cx) / dx)
+                if dx < 0:
+                    t_vals.append((x - cx) / dx)
+                if dy > 0:
+                    t_vals.append(((y + h) - cy) / dy)
+                if dy < 0:
+                    t_vals.append((y - cy) / dy)
+                t = min([tv for tv in t_vals if tv > 0])
+                nx, ny = int(cx + dx * t), int(cy + dy * t)
+
+                # Draw reflection dotted green
+                draw_dotted_line(display_frame, (cx, cy),
+                                 (nx, ny), color=(0, 255, 0))
+
+                # Reflect direction
+                if nx <= x or nx >= x + w:
+                    dx = -dx
+                if ny <= y or ny >= y + h:
+                    dy = -dy
+                cx, cy = nx, ny
 
     cv2.imshow("Hough Line Tuner", display_frame)
     key = cv2.waitKey(1) & 0xFF
